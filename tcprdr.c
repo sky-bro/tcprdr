@@ -1,10 +1,13 @@
+/*
+ * $Id$
+ */
+
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-
 
 #include <sys/poll.h>
 
@@ -135,8 +138,6 @@ static void copyfd_io(int fd_zero, int fd_one)
 	fds[1].fd = fd_one;
 
 	for (;;) {
-		char buf[4096];
-		ssize_t len = 0;
 		int readfd, writefd;
 
 		readfd = -1;
@@ -149,6 +150,7 @@ static void copyfd_io(int fd_zero, int fd_one)
        			perror("poll");
 	       		return;	
 	       	case 0:
+			/* should not happen, we requested infinite wait */	
        			fputs("Timed out?!", stderr);
        			return;
 		}
@@ -165,15 +167,22 @@ static void copyfd_io(int fd_zero, int fd_one)
 		}
 
 		if (readfd>=0 && writefd >= 0) {
+			char buf[4096];
+			ssize_t len;
+
 			len = read(readfd, buf, sizeof buf);
 			if (!len) return;
 			if (len < 0) {
+				if (errno == EINTR)
+					continue;
+
 				perror("read");
 				return;
 			}
 			if (!do_write(writefd, buf, len)) return;
 		} else {
-			fputs("Warning: no useful poll() event", stderr); /* XXX */
+			/* Should not happen,  at least one fd must have POLLHUP and/or POLLIN set */
+			fputs("Warning: no useful poll() event", stderr);
 		}	
 	}
 }
@@ -196,6 +205,23 @@ static int parse_args(int argc, char *const argv[])
 }
 
 
+/* try to chroot; don't complain if chroot doesn't work */
+static void do_chroot(void)
+{	
+	if (chroot("/var/empty") == 0) {
+		/* chroot ok, chdir, setuid must not fail */
+		if (chdir("/")) {
+			perror("chdir /var/empty");
+			exit(1);
+		}	
+		setgid(65535);
+		if (setuid(65535)) {
+			perror("setuid");
+			exit(1);
+		}	
+	}
+}
+
 
 int main(int argc, char *argv[])
 {
@@ -207,9 +233,6 @@ int main(int argc, char *argv[])
 	if (argc < 3)
 		die_usage();
 
-	chdir("/var/empty");
-
-	setgid(65535);
 
 	--argc;
 	++argv;
@@ -226,8 +249,8 @@ int main(int argc, char *argv[])
 	if (listensock < 0)
 		return 1;
 
-	chroot("."); setuid(65535);
-
+	do_chroot();
+	
 	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
 		perror("accept");
 	
