@@ -21,9 +21,28 @@ static void die_usage(void)
 
 static int wanted_pf = PF_UNSPEC;
 
+
+static void xgetaddrinfo(const char *node, const char *service,
+			const struct addrinfo *hints,
+			struct addrinfo **res)
+{
+	int err = getaddrinfo(node, service, hints, res);
+	if (err) {
+		const char *errstr;
+		if (err == EAI_SYSTEM)
+			errstr = strerror(errno);
+		else
+			errstr = gai_strerror(err);
+
+		fprintf(stderr, "Fatal: getaddrinfo(%s:%s): %s\n", node ? node: "", service ? service: "", errstr);
+	        exit(1);
+	}
+}
+
+
 static int sock_listen_tcp(const char * const listenaddr, const char * const port)
 {
-	int err, sock;
+	int sock;
 	struct addrinfo hints = {
 		.ai_protocol = IPPROTO_TCP,
 		.ai_socktype = SOCK_STREAM,
@@ -35,11 +54,7 @@ static int sock_listen_tcp(const char * const listenaddr, const char * const por
 	struct addrinfo *a, *addr;
 	int one = 1;
 
-	err = getaddrinfo(listenaddr, port, &hints, &addr);
-	if (err) {
-		fprintf(stderr, "Fatal: getaddrinfo(): %s\n", gai_strerror(err));
-	        exit(1);
-	}
+	xgetaddrinfo(listenaddr, port, &hints, &addr);
 
 	for (a = addr; a != NULL ; a = a->ai_next) {
 		sock = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
@@ -70,7 +85,7 @@ static int sock_listen_tcp(const char * const listenaddr, const char * const por
 
 static int sock_connect_tcp(const char * const remoteaddr, const char * const port)
 {
-	int err, sock;
+	int sock;
 	struct addrinfo hints = {
 		.ai_protocol = IPPROTO_TCP,
 		.ai_socktype = SOCK_STREAM
@@ -79,11 +94,7 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 
 	hints.ai_family = wanted_pf;
 
-	err = getaddrinfo(remoteaddr, port, &hints, &addr);
-	if (err) {
-		fprintf(stderr, "Fatal: getaddrinfo(): %s\n", gai_strerror(err));
-	        exit(1);
-	}
+	xgetaddrinfo(remoteaddr, port, &hints, &addr);
 
 	for (a=addr; a != NULL; a = a->ai_next) {
 		sock = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
@@ -222,7 +233,8 @@ int main(int argc, char *argv[])
 	struct sockaddr sa;
 	int args;
 	int listensock, remotesock, connsock;
-	socklen_t salen = sizeof sa;
+	socklen_t salen = sizeof(sa);
+	const char *host, *port;
 
 	if (argc < 3)
 		die_usage();
@@ -235,7 +247,7 @@ int main(int argc, char *argv[])
 	argc -= args;
 	argv += args;
 
-	if (argc <= 2) /* we need at least 2 more arguments (srcport, hostname) */
+	if (argc < 2) /* we need at least 2 more arguments (srcport, hostname) */
 		die_usage();
 
 	listensock = sock_listen_tcp(NULL, argv[0]);
@@ -247,8 +259,10 @@ int main(int argc, char *argv[])
 	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
 		perror("accept");
 
-					 /* destport given? if no, use srcport */
-	connsock = sock_connect_tcp(argv[1], argv[2] ? argv[2]:argv[0]);
+	host = argv[1];
+	/* destport given? if no, use srcport */
+	port = argv[2] ? argv[2] : argv[0];
+	connsock = sock_connect_tcp(host, port);
 	if (connsock < 0)
 	       return 1;
 	copyfd_io(connsock, remotesock);
