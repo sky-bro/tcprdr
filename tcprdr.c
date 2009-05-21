@@ -1,26 +1,40 @@
-#include <stdio.h>
 #include <errno.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
 #include <fcntl.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include <sys/poll.h>
-
 #include <sys/socket.h>
 #include <sys/types.h>
 
 #include <netdb.h>
 #include <netinet/in.h>
 
+#ifndef IP_TRANSPARENT
+#define IP_TRANSPARENT      19
+#endif
+
 static void die_usage(void)
 {
-	fputs("Usage: tcprdr [ -4 | -6 ] localport host [ remoteport ]\n", stderr);
+	fputs("Usage: tcprdr [ -4 | -6 ] [ -t ] localport host [ remoteport ]\n", stderr);
 	exit(1);
 }
 
 static int wanted_pf = PF_UNSPEC;
+static bool tproxy = false;
 
+static const char *getxinfo_strerr(int err)
+{
+	const char *errstr;
+	if (err == EAI_SYSTEM)
+		errstr = strerror(errno);
+	else
+		errstr = gai_strerror(err);
+	return errstr;
+}
 
 static void xgetaddrinfo(const char *node, const char *service,
 			const struct addrinfo *hints,
@@ -28,15 +42,70 @@ static void xgetaddrinfo(const char *node, const char *service,
 {
 	int err = getaddrinfo(node, service, hints, res);
 	if (err) {
-		const char *errstr;
-		if (err == EAI_SYSTEM)
-			errstr = strerror(errno);
-		else
-			errstr = gai_strerror(err);
-
+		const char *errstr = getxinfo_strerr(err);
 		fprintf(stderr, "Fatal: getaddrinfo(%s:%s): %s\n", node ? node: "", service ? service: "", errstr);
 	        exit(1);
 	}
+}
+
+
+static void xgetnameinfo(const struct sockaddr *sa, socklen_t salen,
+			char *host, size_t hostlen,
+			char *serv, size_t servlen, int flags)
+{
+	int err = getnameinfo(sa, salen, host, hostlen, serv, servlen, flags);
+	if (err) {
+		const char *errstr = getxinfo_strerr(err);
+		fprintf(stderr, "Fatal: getnameinfo(): %s\n", errstr);
+	        exit(1);
+	}
+}
+
+
+static void ipaddrtostr(const struct sockaddr *sa, socklen_t salen, char *resbuf, size_t reslen, char *port, size_t plen)
+{
+	xgetnameinfo(sa, salen, resbuf, reslen, port, plen, NI_NUMERICHOST|NI_NUMERICSERV);
+}
+
+
+static void logendpoints(int dest, int origin)
+{
+	struct sockaddr_storage ss1, ss2;
+	int ret;
+	char buf1[INET6_ADDRSTRLEN];
+	char buf2[INET6_ADDRSTRLEN];
+
+	socklen_t sa1len, sa2len;
+
+	sa1len = sa2len = sizeof(ss1);
+
+	ret = getpeername(origin, (struct sockaddr *) &ss1, &sa1len);
+	if (ret == -1) {
+		perror("getpeername");
+		return;
+	}
+	ret = getpeername(dest, (struct sockaddr *) &ss2, &sa1len);
+	if (ret == -1) {
+		perror("getpeername");
+		return;
+	}
+	ipaddrtostr((const struct sockaddr *) &ss1, sa1len, buf1, sizeof(buf1), NULL, 0);
+	ipaddrtostr((const struct sockaddr *) &ss2, sa2len, buf2, sizeof(buf2), NULL, 0);
+
+	fprintf(stderr, "Handling connection from %s to %s", buf1, buf2);
+	if (tproxy) {
+		char port[8];
+
+		sa1len = sizeof(ss1);
+		ret = getsockname(origin, (struct sockaddr *) &ss1, &sa1len);
+		if (ret) {
+			perror("getsockname");
+			return;
+		}
+		ipaddrtostr((const struct sockaddr *) &ss1, sa1len, buf1, sizeof(buf1), port, sizeof(port));
+		fprintf(stderr, " (original destination was %s:%s)", buf1, port);
+	}
+	fputc('\n', stderr);
 }
 
 
@@ -202,6 +271,7 @@ static int parse_args(int argc, char *const argv[])
 		switch(argv[i][1]) {
 			case '4': wanted_pf = PF_INET; break;
 			case '6': wanted_pf = PF_INET6; break;
+			case 't': tproxy = true; break;
 			default:
 				die_usage();
 		}
@@ -254,7 +324,11 @@ int main(int argc, char *argv[])
 	if (listensock < 0)
 		return 1;
 
-	do_chroot();
+	if (tproxy) {
+		static int one = 1;
+		if (setsockopt(listensock, SOL_IP, IP_TRANSPARENT, &one, sizeof(one)))
+			perror("setsockopt(IP_TRANSPARENT)");
+	}
 
 	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
 		perror("accept");
@@ -265,6 +339,9 @@ int main(int argc, char *argv[])
 	connsock = sock_connect_tcp(host, port);
 	if (connsock < 0)
 	       return 1;
+
+	do_chroot();
+	logendpoints(connsock, remotesock);
 	copyfd_io(connsock, remotesock);
 	close(connsock);
 	close(remotesock);
