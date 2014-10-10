@@ -12,6 +12,15 @@
 
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+
+#ifndef TCP_FASTOPEN
+#define TCP_FASTOPEN   23
+#endif
+
+#ifndef MSG_FASTOPEN
+#define MSG_FASTOPEN   0x20000000
+#endif
 
 #ifndef IP_TRANSPARENT
 #define IP_TRANSPARENT      19
@@ -19,12 +28,13 @@
 
 static void die_usage(void)
 {
-	fputs("Usage: tcprdr [ -4 | -6 ] [ -t ] localport host [ remoteport ]\n", stderr);
+	fputs("Usage: tcprdr [ -4 | -6 ] [ -t ] [ -f ] localport host [ remoteport ]\n", stderr);
 	exit(1);
 }
 
 static int wanted_pf = PF_UNSPEC;
 static bool tproxy = false;
+static bool fastopen = false;
 
 static const char *getxinfo_strerr(int err)
 {
@@ -151,15 +161,46 @@ static int sock_listen_tcp(const char * const listenaddr, const char * const por
 	return sock;
 }
 
-
-static int sock_connect_tcp(const char * const remoteaddr, const char * const port)
+static int
+connect_fastopen(int txfd, char *buf, int blen, const struct sockaddr *dest_addr, socklen_t alen)
 {
+	int ret;
+	/* implicit connect() */
+	ret = sendto(txfd, buf, blen, MSG_FASTOPEN, dest_addr, alen);
+
+	if (ret != blen)
+		return -1;
+	return 0;
+}
+
+static int
+connect_fastopen_prepare(int fd, char *buf, size_t len)
+{
+	int r = recv(fd, buf, len, MSG_DONTWAIT);
+
+	if (r >= 0)
+		return r;
+	return (errno == EAGAIN || errno == EINTR) ? -1 : 0;
+}
+
+static int sock_connect_tcp(const char * const remoteaddr, const char * const port, int rs)
+{
+	char buf[1024];
+	int buflen;
 	int sock;
 	struct addrinfo hints = {
 		.ai_protocol = IPPROTO_TCP,
 		.ai_socktype = SOCK_STREAM
 	};
 	struct addrinfo *a, *addr;
+
+	if (fastopen) {
+		buflen = connect_fastopen_prepare(rs, buf, sizeof(buf));
+		if (buflen == 0)
+			return -1;
+		else if (buflen < 0)
+			buflen = 0;
+	}
 
 	hints.ai_family = wanted_pf;
 
@@ -172,10 +213,15 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 			continue;
 		}
 
-		if (connect(sock, a->ai_addr, a->ai_addrlen) == 0)
-			break; /* success */
+		if (fastopen && buflen > 0) {
+			if (connect_fastopen(sock, buf, buflen, a->ai_addr, a->ai_addrlen) == 0)
+				break; /* success */
+		} else {
+			if (connect(sock, a->ai_addr, a->ai_addrlen) == 0)
+				break; /* success */
+			perror("connect()");
+		}
 
-		perror("connect()");
 		close(sock);
 		sock = -1;
 	}
@@ -272,6 +318,7 @@ static int parse_args(int argc, char *const argv[])
 			case '4': wanted_pf = PF_INET; break;
 			case '6': wanted_pf = PF_INET6; break;
 			case 't': tproxy = true; break;
+			case 'f': fastopen = true; break;
 			default:
 				die_usage();
 		}
@@ -330,13 +377,21 @@ int main(int argc, char *argv[])
 			perror("setsockopt(IP_TRANSPARENT)");
 	}
 
+	if (fastopen) {
+		int tmp = 32;
+		if (setsockopt(listensock, SOL_TCP, TCP_FASTOPEN, &tmp, sizeof(tmp)))
+			perror("setsockopt(TCP_FASTOPEN)");
+		if (setsockopt(listensock, SOL_TCP, TCP_DEFER_ACCEPT, &tmp, sizeof(tmp)))
+			perror("setsockopt(TCP_DEFER_ACCEPT)");
+	}
+
 	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
 		perror("accept");
 
 	host = argv[1];
 	/* destport given? if no, use srcport */
 	port = argv[2] ? argv[2] : argv[0];
-	connsock = sock_connect_tcp(host, port);
+	connsock = sock_connect_tcp(host, port, remotesock);
 	if (connsock < 0)
 	       return 1;
 
