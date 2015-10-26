@@ -28,11 +28,12 @@
 
 static void die_usage(void)
 {
-	fputs("Usage: tcprdr [ -4 | -6 ] [ -t ] [ -f ] localport host [ remoteport ]\n", stderr);
+	fputs("Usage: tcprdr [ -4 | -6 ] [ -f ] [ -l ] [ -t ] localport host [ remoteport ]\n", stderr);
 	exit(1);
 }
 
 static int wanted_pf = PF_UNSPEC;
+static bool loop = false;
 static bool tproxy = false;
 static bool fastopen = false;
 
@@ -190,7 +191,7 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 	int sock;
 	struct addrinfo hints = {
 		.ai_protocol = IPPROTO_TCP,
-		.ai_socktype = SOCK_STREAM
+		.ai_socktype = SOCK_STREAM,
 	};
 	struct addrinfo *a, *addr;
 
@@ -319,6 +320,7 @@ static int parse_args(int argc, char *const argv[])
 			case '6': wanted_pf = PF_INET6; break;
 			case 't': tproxy = true; break;
 			case 'f': fastopen = true; break;
+			case 'l': loop = true; break;
 			default:
 				die_usage();
 		}
@@ -344,13 +346,37 @@ static void do_chroot(void)
 	}
 }
 
+int main_loop(int listensock, const char *host, const char *port)
+{
+	struct sockaddr sa;
+	socklen_t salen = sizeof(sa);
+        int remotesock, connsock;
+
+ again:
+	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
+		perror("accept");
+
+	connsock = sock_connect_tcp(host, port, remotesock);
+	if (connsock < 0)
+	       return 1;
+
+	if (!loop)
+		do_chroot();
+
+	logendpoints(connsock, remotesock);
+	copyfd_io(connsock, remotesock);
+	close(connsock);
+	close(remotesock);
+
+	if (loop)
+		goto again;
+	return 0;
+}
 
 int main(int argc, char *argv[])
 {
-	struct sockaddr sa;
 	int args;
-	int listensock, remotesock, connsock;
-	socklen_t salen = sizeof(sa);
+	int listensock;
 	const char *host, *port;
 
 	if (argc < 3)
@@ -384,23 +410,10 @@ int main(int argc, char *argv[])
 		if (setsockopt(listensock, SOL_TCP, TCP_DEFER_ACCEPT, &tmp, sizeof(tmp)))
 			perror("setsockopt(TCP_DEFER_ACCEPT)");
 	}
-
-	while ((remotesock = accept(listensock, &sa, &salen)) < 0)
-		perror("accept");
-
 	host = argv[1];
 	/* destport given? if no, use srcport */
 	port = argv[2] ? argv[2] : argv[0];
-	connsock = sock_connect_tcp(host, port, remotesock);
-	if (connsock < 0)
-	       return 1;
 
-	do_chroot();
-	logendpoints(connsock, remotesock);
-	copyfd_io(connsock, remotesock);
-	close(connsock);
-	close(remotesock);
-
-	return 0;
+	return main_loop(listensock, host, port);
 }
 
