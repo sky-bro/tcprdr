@@ -220,9 +220,9 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 		} else {
 			if (connect(sock, a->ai_addr, a->ai_addrlen) == 0)
 				break; /* success */
-			perror("connect()");
 		}
 
+		perror("connect()");
 		close(sock);
 		sock = -1;
 	}
