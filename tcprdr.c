@@ -28,13 +28,14 @@
 
 static void die_usage(void)
 {
-	fputs("Usage: tcprdr [ -4 | -6 ] [ -f ] [ -l ] [ -t ] localport host [ remoteport ]\n", stderr);
+	fputs("Usage: tcprdr [ -4 | -6 ] [ -f ] [ -l ] [ -t [ -T ]] localport host [ remoteport ]\n", stderr);
 	exit(1);
 }
 
 static int wanted_pf = PF_UNSPEC;
 static bool loop = false;
 static bool tproxy = false;
+static bool tproxy_trans = false; /* use non-local, original client ip for outgoing connection */
 static bool fastopen = false;
 
 static const char *getxinfo_strerr(int err)
@@ -194,6 +195,8 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 		.ai_socktype = SOCK_STREAM,
 	};
 	struct addrinfo *a, *addr;
+	struct sockaddr_storage sa;
+	socklen_t salen = sizeof(sa);
 
 	if (fastopen) {
 		buflen = connect_fastopen_prepare(rs, buf, sizeof(buf));
@@ -206,12 +209,28 @@ static int sock_connect_tcp(const char * const remoteaddr, const char * const po
 	hints.ai_family = wanted_pf;
 
 	xgetaddrinfo(remoteaddr, port, &hints, &addr);
+	if (tproxy_trans) {
+		if (getpeername(rs, (void *) &sa, &salen) != 0) {
+			perror("getpeername");
+			tproxy_trans = false;
+		}
+	}
 
 	for (a=addr; a != NULL; a = a->ai_next) {
 		sock = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
 		if (sock < 0) {
 			perror("socket");
 			continue;
+		}
+
+		if (tproxy_trans) {
+			static const int one = 1;
+
+			if (setsockopt(sock, SOL_IP, IP_TRANSPARENT, &one, sizeof(one)))
+				perror("setsockopt(IP_TRANSPARENT2)");
+
+			if (bind(sock, (void *) &sa, salen))
+				perror("fake bind");
 		}
 
 		if (fastopen && buflen > 0) {
@@ -319,6 +338,7 @@ static int parse_args(int argc, char *const argv[])
 			case '4': wanted_pf = PF_INET; break;
 			case '6': wanted_pf = PF_INET6; break;
 			case 't': tproxy = true; break;
+			case 'T': tproxy_trans = true; break;
 			case 'f': fastopen = true; break;
 			case 'l': loop = true; break;
 			default:
