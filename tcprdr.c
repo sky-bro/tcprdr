@@ -96,7 +96,7 @@ static void logendpoints(int dest, int origin)
 		perror("getpeername");
 		return;
 	}
-	ret = getpeername(dest, (struct sockaddr *) &ss2, &sa1len);
+	ret = getpeername(dest, (struct sockaddr *) &ss2, &sa2len);
 	if (ret == -1) {
 		perror("getpeername");
 		return;
