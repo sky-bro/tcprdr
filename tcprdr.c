@@ -28,7 +28,7 @@
 
 static void die_usage(void)
 {
-	fputs("Usage: tcprdr [ -4 | -6 ] [ -f ] [ -l ] [ -t [ -T ]] localport host [ remoteport ]\n", stderr);
+	fputs("Usage: tcprdr [ -4 | -6 ] [ -f ] [ -l ] [ -t [ -T ]] [ -L listen address ] localport host [ remoteport ]\n", stderr);
 	exit(1);
 }
 
@@ -37,6 +37,7 @@ static bool loop = false;
 static bool tproxy = false;
 static bool tproxy_trans = false; /* use non-local, original client ip for outgoing connection */
 static bool fastopen = false;
+static char *listenaddr = NULL;
 
 static const char *getxinfo_strerr(int err)
 {
@@ -341,6 +342,12 @@ static int parse_args(int argc, char *const argv[])
 			case 'T': tproxy_trans = true; break;
 			case 'f': fastopen = true; break;
 			case 'l': loop = true; break;
+			case 'L':
+				if (i + 1 < argc)
+					listenaddr = argv[++i];
+				else
+					die_usage();
+				break;
 			default:
 				die_usage();
 		}
@@ -413,7 +420,7 @@ int main(int argc, char *argv[])
 	if (argc < 2) /* we need at least 2 more arguments (srcport, hostname) */
 		die_usage();
 
-	listensock = sock_listen_tcp(NULL, argv[0]);
+	listensock = sock_listen_tcp(listenaddr, argv[0]);
 	if (listensock < 0)
 		return 1;
 
